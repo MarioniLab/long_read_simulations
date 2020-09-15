@@ -1,0 +1,132 @@
+---
+title: CELLO-Seq Sarlacc pipeline - simulation sample adaptor filtering
+author: Rebecca Berrens, Andrian Yang, Aaron Lun, Florian Bieberich
+output:
+  BiocStyle::html_document:
+    toc_float: true
+    titlecaps: false
+---
+
+
+```{r, echo=FALSE, results="hide", message=FALSE}
+require(knitr)
+opts_chunk$set(error=FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r setup, echo=FALSE, message=FALSE}
+library(sarlacc)
+```
+
+# Introduction
+
+This series of Rmarkdown files forms the CELLO-Seq sarlacc data processing pipeline, which utilises the `sarlacc` R package as its base.
+
+For simulated read processing, we assign all reads to the same cell barcode, so demultiplexing is not required. However, we will need to perform adaptor alignment and filtering as these steps are required for grouping and errorcorrect/deduplicate step.
+
+# Setting up sequence data
+
+First, we define CELLO-seq adaptor sequences that should be present on each end of the read sequences.
+
+Here, adaptor 1 represent the splint oligo containing the sample barcode (represented by a strech of `N`s) and the UMI (represented by a stretch of `NRY`s).
+Since we did not include the TSO adaptor in our simulated reads, we will set adaptor 2 sequence to be empty.
+
+```{r}
+adaptor1 <- "GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAGNNNNNNNNNNNNNNNNNNNNNNNNAGTGGTATCNRYNRYNRYNRYNRYNRYNRYNACTGGCCGTCGTTTTACATGGCGTAGCGGGTTCGAGCGCACCGCAGGGTATCCGGCTATTTTTTTTTTTTTTT"
+adaptor2 <- ""
+```
+
+We then define the barcode sequences that could be present in the first stretch of `N`s in `adaptor1`.
+For simulated data, we use the same cell barcode for all simulated reads, so we will only include one barcode.
+
+```{r}
+all.barcodes <- c("CACAAAGACACCGACAACTTTCTT")
+```
+
+# Alignment of adaptor
+
+We now align the adaptor sequences to all of the reads using sarlacc's `adaptorAlign` function^[We are using fixed parameters chosen from one run of the `tuning.Rmd` file. We could also supply the tuned parameters directly but will not do so for simplicity.].
+
+By default, the alignment will only consider the 250 bp on either end of the read to reduce the runtime, under the assumption that the adaptors should occur at the read ends.
+This can be further sped up by parallelising jobs using the `BiocParallel` package with the appropriate backend supplied to the optional `BPPARAM=` argument.
+
+```{r}
+aln.out <- adaptorAlign(adaptor1, adaptor2, filepath=FASTQ_FILE, gapOpening=4, gapExtension=1)
+colnames(aln.out)
+```
+
+The output is a `DataFrame` that contains alignment information for each adaptor. For example, the `adaptor1` field contains a nested `DataFrame` with alignment scores and positions for `adaptor1` on the read:
+
+```{r}
+aln.out$adaptor1
+```
+
+Note that the positions here refer to coordinates on a "canonical orientation" of the read where the adaptor 1 occurs at the 5' end.
+Reads are marked as being reverse-complemented (if necessary) to match this canonical orientation, to ensure that adaptor 1 and 2 are located on the 5' and 3' ends respectively.
+
+Whether or not a read sequence was reverse-complemented is indicated by the `aln.out$reversed` field:
+
+```{r}
+summary(aln.out$reversed)
+```
+
+# Filtering for adaptor-containing reads
+
+We now use sarlacc's `getAdaptorThresholds` function to choose an appropriate score threshold for the presence of an adaptor.
+This involves scrambling the start and end sequences, and repeating the alignment, with the aim of choosing a threshold that distinguishes between the real and scrambled scores.
+
+To expedite this process, we only perform this for a random set of 10000 reads.
+
+```{r}
+N <- min(10000, nrow(aln.out))
+subset <- aln.out[sample(nrow(aln.out), N),]
+thresh <- getAdaptorThresholds(subset)
+thresh$threshold1
+thresh$threshold2
+```
+
+We verify that the thresholds are suitable for adaptor 1:
+
+```{r, fig.cap="Distribution of adaptor 1 alignment scores for the real reads (blue) and scrambled sequences (red)."}
+real.dist <- density(thresh$scores1$reads)
+scrambled.dist <- density(thresh$scores1$scrambled)
+plot(real.dist, xlim=range(real.dist$x, scrambled.dist$x),
+    ylim=range(real.dist$y, scrambled.dist$y), col="blue")
+lines(scrambled.dist, col="red")
+abline(v=thresh$threshold1, col="grey", lty=2)
+```
+
+... and for adaptor 2:
+
+```{r, fig.cap="Distribution of adaptor 2 alignment scores for the real reads (blue) and scrambled sequences (red)."}
+real.dist <- density(thresh$scores2$reads)
+scrambled.dist <- density(thresh$scores2$scrambled)
+plot(real.dist, xlim=range(real.dist$x, scrambled.dist$x),
+    ylim=range(real.dist$y, scrambled.dist$y), col="blue")
+lines(scrambled.dist, col="red")
+abline(v=thresh$threshold2, col="grey", lty=2)
+```
+
+Based on these thresholds, we retain only those reads that have well-aligned adaptors on both sides^[We'll round the thresholds to fixed values, for simplicity and to simplify reproducibility.].
+
+```{r}
+filtered <- filterReads(aln.out, thresh$threshold1, thresh$threshold2)
+nrow(filtered)
+```
+
+# Writing out filtered reads
+
+We now output the filtered reads as a FASTQ file for the alignment step and an rds file containing the adaptor alignment information for use in grouping and errorcorrection/deduplication.
+
+```{r}
+fastq.sample <- realizeReads(filtered)
+outfile <- paste0(gsub(".fastq", "", FASTQ_FILE), "_processed.fastq")
+writeXStringSet(fastq.sample, outfile, format = "fastq", qualities=quality(fastq.sample))
+saveRDS(filtered, file = paste0(gsub(".fastq", "", FASTQ_FILE), "_processed.rds"))
+```
+
+# Session information
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,107 @@
+---
+title: CELLO-Seq Sarlacc pipeline - simulated UMI grouping
+author: Rebecca Berrens, Andrian Yang, Aaron Lun, Florian Bieberich
+output:
+  BiocStyle::html_document:
+    toc_float: true
+    titlecaps: false
+---
+
+```{r, echo=FALSE, results="hide", message=FALSE}
+require(knitr)
+opts_chunk$set(error=FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r setup, echo=FALSE, message=FALSE}
+library(sarlacc)
+```
+
+# Introduction
+
+This series of Rmarkdown files forms the CELLO-Seq sarlacc data processing pipeline, which utilises the `sarlacc` R package as its base.
+
+For perfect grouping of reads, we will create read groups based on the read names of the reads, which contain the true location of the reads.
+
+# Reading files
+
+We read in the the RDS file containing the adapter information for the sample.
+
+```{r}
+my.sample_fastq <- readRDS(paste0(INDEX, ".rds"))
+```
+
+# Defining perfect groups
+
+We now form the perfect groups based on the read names.
+
+```{r}
+sample.readnames <- gsub(",.*", "", rownames(my.sample_fastq))
+groups <- lapply(unique(sample.readnames), function(x) which(sample.readnames == x))
+summary(lengths(groups))
+```
+
+# Writing out read groups
+
+We will now output the read groups for error-correction or deduplication.
+We will also output the read names for each read groups since the read names contains the true location of each simulated reads.
+Since error-correction can take some time to run, we will split the list of read groups into multiple smaller chunks and limit the amount of reads per groups.
+
+```{r}
+read.split <- 2000000
+max.read.group.size <- 50
+
+chunk.id <- 1
+chunk.groups <- c()
+chunk.read.total <- 0
+
+for (i in 1:length(groups)) {
+  group <- groups[i]
+  group.length <- length(unlist(group))
+
+  if (group.length == 0){
+    next
+  }
+
+  if (group.length > max.read.group.size) {
+    group[[1]] <- sample(group[[1]], max.read.group.size)
+    group.length <- max.read.group.size
+  }
+
+  if (length(chunk.groups) == 0) {
+    chunk.groups <- c(chunk.groups, c(group))
+    chunk.read.total <- chunk.read.total + group.length
+  } else {
+    if ((chunk.read.total + group.length) > read.split) {
+      saveRDS(chunk.groups, file=paste0(INDEX, ".perfect_groups.", chunk.id, ".rds", sep=""))
+
+      read.names = lapply(chunk.groups, function(x){
+        rownames(my.sample_fastq[x,])
+      })
+      saveRDS(read.names, paste0(INDEX, ".perfect_readnames.", chunk_id, ".rds", sep=""))
+
+      chunk.id <- chunk.id + 1
+      chunk.groups <- c()
+      chunk.read.total <- 0
+    }
+
+    chunk.groups <- c(chunk.groups, c(group))
+    chunk.read.total <- chunk.read.total + group.length
+  }
+}
+saveRDS(chunk.groups, file=paste0(INDEX, ".perfect_readnames.", chunk.id, ".rds", sep=""))
+
+read.names = lapply(chunk.groups, function(x){
+  rownames(my.sample_fastq[x,])
+})
+saveRDS(read.names, paste0(INDEX, ".perfect_readnames.", chunk_id, ".rds", sep=""))
+```
+
+# Session information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
